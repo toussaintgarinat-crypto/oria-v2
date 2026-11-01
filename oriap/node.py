@@ -3,16 +3,26 @@ puis échange l'offre/réponse WebRTC chiffrées (le serveur ne voit pas le SDP)
 Le SDP contient l'empreinte DTLS : elle est donc liée aux ID Oria authentifiés."""
 import asyncio
 import json
+import os
 from typing import Awaitable, Callable
 
 import websockets
-from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 
 from .handshake import Handshake
 from .identity import Identity
 from .signaling import CTX
 
-RTC_CONFIG = RTCConfiguration(iceServers=[])  # LAN/loopback ; STUN/TURN à ajouter (étape NAT)
+
+
+def ice_config(servers: list[dict] | None = None) -> RTCConfiguration:
+    """Configuration ICE. `servers` = [{"urls": "stun:h:3478"}, {"urls": "turn:h:3478", "username": u, "credential": c}].
+    À défaut, variable d'environnement ORIA_ICE_SERVERS (JSON) ; sinon aucun serveur (LAN/loopback)."""
+    if servers is None:
+        servers = json.loads(os.environ.get("ORIA_ICE_SERVERS", "[]"))
+    return RTCConfiguration(iceServers=[
+        RTCIceServer(urls=s["urls"], username=s.get("username"), credential=s.get("credential")) for s in servers
+    ])
 
 
 class Session:
@@ -25,10 +35,12 @@ class Session:
 
 
 class OriaNode:
-    def __init__(self, identity: Identity, url: str, on_track: Callable | None = None, local_track=None):
+    def __init__(self, identity: Identity, url: str, on_track: Callable | None = None, local_track=None,
+                 ice_servers: list[dict] | None = None):
         self.identity, self.url = identity, url
         self.on_track = on_track          # appelé (peer_id, track) à la réception d'un flux
         self.local_track = local_track    # piste envoyée quand on décroche
+        self.rtc_config = ice_config(ice_servers)
         self._ws = None
         self._sessions: dict[str, Session] = {}
         self._task: asyncio.Task | None = None
@@ -59,7 +71,7 @@ class OriaNode:
         await self._send(peer, {"t": "enc", "frame": frame.hex()})
 
     def _new_pc(self, peer: str) -> RTCPeerConnection:
-        pc = RTCPeerConnection(RTC_CONFIG)
+        pc = RTCPeerConnection(self.rtc_config)
         self._sessions[peer].pc = pc
         if self.local_track is not None:
             pc.addTrack(self.local_track)

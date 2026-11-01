@@ -32,7 +32,8 @@ Trame = `compteur (u64 BE)` ‖ ChaCha20-Poly1305(nonce = 4×0 ‖ compteur). Le
 - Serveur WebSocket (`oriap/signaling.py`) : à la connexion, challenge `nonce` ; le client prouve la possession de la clé en signant `"oriap/v1/signal" ‖ nonce`. Le serveur tient un annuaire `ID → connexion` et relaie `{"type":"relay","to":ID,"payload":…}` sans interpréter la charge. Cible hors ligne ⇒ `{"type":"error","code":"offline"}`.
 - Le serveur n'est pas de confiance : le handshake §2 passe en charge utile (`hs1`/`hs2`/`auth`), puis l'offre/réponse SDP WebRTC circule chiffrée (`enc`) sous la clé de session. L'empreinte DTLS du SDP est ainsi liée aux ID authentifiés ; le serveur ne voit ni le SDP ni le média (média = direct, DTLS-SRTP).
 - `OriaNode.call(id)` (`oriap/node.py`) : un appel vocal initié uniquement à partir d'un ID Oria, sans numéro. Test : `oriap/tests/test_call.py` (audio sinusoïdal reçu par le pair en loopback).
-- Limites : pas de STUN/TURN (donc LAN/loopback uniquement) ; le serveur voit qui parle à qui (métadonnées) ; pas de sonnerie/refus d'appel ni de DoS-protection (limites de débit).
+- Traversée NAT : `OriaNode(ice_servers=[...])` ou variable `ORIA_ICE_SERVERS` (JSON, ex. `[{"urls":"stun:h:3478"},{"urls":"turn:h:3478","username":"u","credential":"c"}]`). Sans configuration : aucun serveur, LAN/loopback uniquement (pas de dépendance à un tiers par défaut). Un coturn auto-hébergé est fourni dans `deploy/`.
+- Limites : STUN/TURN configurable mais **non testé sur un vrai NAT** (le sandbox n'a qu'un réseau) ; identifiants TURN statiques (pas encore d'identifiants éphémères) ; le serveur voit qui parle à qui (métadonnées) ; pas de sonnerie/refus d'appel ni de DoS-protection (limites de débit).
 
 ## 7. Suite
 1. Traversée NAT (STUN/TURN), sonnerie/refus, durée de vie des sessions.

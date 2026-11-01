@@ -64,5 +64,25 @@ class CallTest(unittest.IsolatedAsyncioTestCase):
             await ws.recv()
 
 
+class IceConfigTest(unittest.TestCase):
+    def test_default_has_no_servers(self):
+        from oriap.node import ice_config
+        self.assertEqual(ice_config([]).iceServers, [])
+
+    def test_stun_and_turn_parsed(self):
+        from oriap.node import ice_config
+        cfg = ice_config([{"urls": "stun:s:3478"},
+                          {"urls": "turn:t:3478", "username": "u", "credential": "c"}])
+        self.assertEqual(cfg.iceServers[0].urls, "stun:s:3478")
+        self.assertEqual((cfg.iceServers[1].username, cfg.iceServers[1].credential), ("u", "c"))
+
+    def test_env_var(self):
+        import os
+        from unittest import mock
+        from oriap.node import ice_config
+        with mock.patch.dict(os.environ, {"ORIA_ICE_SERVERS": '[{"urls":"stun:e:1"}]'}):
+            self.assertEqual(ice_config().iceServers[0].urls, "stun:e:1")
+
+
 if __name__ == "__main__":
     unittest.main()
