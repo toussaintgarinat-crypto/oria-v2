@@ -12,8 +12,13 @@ class LogTest(unittest.TestCase):
     def setUp(self):
         self.a, self.b = Identity.generate(), Identity.generate()
 
+    def new_log(self):
+        log = MessageLog()
+        self.addCleanup(log.close)
+        return log
+
     def test_tampered_rejected_duplicate_idempotent(self):
-        log, src = MessageLog(), MessageLog()
+        log, src = self.new_log(), self.new_log()
         m = src.create(self.a, "salut")
         bad = copy.deepcopy(m)
         bad["body"]["text"] = "modifié"
@@ -26,7 +31,7 @@ class LogTest(unittest.TestCase):
         self.assertEqual(len(log.thread()), 1)
 
     def test_concurrent_writes_converge_same_order(self):
-        l1, l2 = MessageLog(), MessageLog()
+        l1, l2 = self.new_log(), self.new_log()
         base = l1.create(self.a, "base", ts=1)
         l2.add(base)
         m1 = l1.create(self.a, "de A", ts=5)       # écritures concurrentes

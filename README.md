@@ -7,7 +7,7 @@ Tests : `python3 -m unittest discover -s oriap/tests -t .`
 
 ## Appel entre deux réseaux
 Fournir un STUN/TURN : `export ORIA_ICE_SERVERS='[{"urls":"stun:IP:3478"},{"urls":"turn:IP:3478","username":"u","credential":"c"}]'`.
-Un coturn auto-hébergé : `deploy/docker-compose.turn.yml` + `deploy/turnserver.conf` (remplacer les `CHANGE_ME`).
+Un coturn auto-hébergé + la signalisation : voir `docs/PROXMOX_TEST.md` (`deploy/docker-compose.yml`).
 
 ## Démonstration (deux terminaux + un serveur)
 ```

@@ -131,5 +131,65 @@ class RingAndTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(c, base64.b64encode(hmac.new(b"secret", b"1100", hashlib.sha1).digest()).decode())
 
 
+class GroupCallTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.srv = await serve("127.0.0.1", 0).__aenter__()
+        self.url = f"ws://127.0.0.1:{self.srv.sockets[0].getsockname()[1]}"
+        self.heard = {}
+
+    async def asyncTearDown(self):
+        self.srv.close()
+        await self.srv.wait_closed()
+
+    def make(self, name, freq, **kw):
+        ident = Identity.generate()
+
+        def on_track(peer, track):
+            async def pull():
+                frames = [await track.recv() for _ in range(40)]
+                x = np.concatenate([f.to_ndarray().reshape(-1)[0::2] for f in frames[10:]]).astype(float)
+                spec = np.abs(np.fft.rfft(x * np.hanning(len(x))))
+                self.heard[(name, peer)] = (np.argmax(spec[1:]) + 1) * 48000 / len(x)
+            asyncio.ensure_future(pull())
+        return ident, OriaNode(ident, self.url, local_track=ToneTrack(freq), on_track=on_track, **kw)
+
+    async def test_three_way_mesh(self):
+        (ia, a), (ib, b), (ic, c) = self.make("A", 440), self.make("B", 660), self.make("C", 880)
+        for n in (a, b, c):
+            await n.start()
+        try:
+            res = await a.call_group([ib.id, ic.id])
+            self.assertTrue(all(not isinstance(r, Exception) for r in res.values()), res)
+            deadline = asyncio.get_running_loop().time() + 25
+            while len(self.heard) < 6 and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.1)
+            ids = {ia.id: ("A", 440), ib.id: ("B", 660), ic.id: ("C", 880)}
+            self.assertEqual(len(self.heard), 6)            # chacun entend les deux autres
+            for (listener, speaker_id), freq in self.heard.items():
+                self.assertNotEqual(ids[speaker_id][0], listener)
+                self.assertAlmostEqual(freq, ids[speaker_id][1], delta=15)   # et reconnaît chaque voix
+        finally:
+            for n in (a, b, c):
+                await n.stop()
+
+    async def test_one_decline_does_not_break_others(self):
+        from oriap.node import CallDeclined
+        (ia, a), (ib, b), (ic, c) = self.make("A", 440), self.make("B", 660), self.make("C", 880, on_incoming=lambda p: False)
+        for n in (a, b, c):
+            await n.start()
+        try:
+            res = await a.call_group([ib.id, ic.id])
+            self.assertIsInstance(res[ic.id], CallDeclined)
+            self.assertFalse(isinstance(res[ib.id], Exception))
+            for _ in range(150):
+                if len(self.heard) >= 2:
+                    break
+                await asyncio.sleep(0.1)
+            self.assertEqual({k for k in self.heard}, {("A", ib.id), ("B", ia.id)})   # A et B s'entendent, C exclu
+        finally:
+            for n in (a, b, c):
+                await n.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

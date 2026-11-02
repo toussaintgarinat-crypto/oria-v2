@@ -1,6 +1,6 @@
 """CLI de démonstration : python -m oriap {id,serve,listen,call,chat}
 
-  python -m oriap serve  --port 8765 [--turn-secret S --turn-url turn:IP:3478]
+  python -m oriap serve  --port 8765 [--turn-secret S --turn-url turn:IP:3478]   # ou ORIA_TURN_SECRET / ORIA_TURN_URLS
   python -m oriap listen --url ws://H:8765 --key a.key [--decline] [--out recu.wav]
   python -m oriap call   --url ws://H:8765 --key b.key --to oria:... [--seconds 5] [--out recu.wav]
   python -m oriap chat   --url ws://H:8765 --key a.key --db a.db [--peer oria:...]
@@ -49,6 +49,9 @@ async def _drain(track):
 
 
 async def run(a):
+    if a.cmd == "serve":
+        a.turn_secret = a.turn_secret or os.environ.get("ORIA_TURN_SECRET")   # via l'env : invisible dans `ps`
+        a.turn_url = a.turn_url or [u for u in os.environ.get("ORIA_TURN_URLS", "").split(",") if u]
     if a.cmd == "id":
         print(load_identity(a.key).id)
     elif a.cmd == "serve":

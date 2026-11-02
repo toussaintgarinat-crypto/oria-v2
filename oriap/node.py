@@ -12,6 +12,7 @@ from typing import Callable
 
 import websockets
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaRelay
 
 from .handshake import Handshake
 from .identity import Identity
@@ -61,6 +62,8 @@ class OriaNode:
         self._sessions: dict[str, Session] = {}
         self._task: asyncio.Task | None = None
         self._bg: set[asyncio.Task] = set()
+        self._relay = MediaRelay()                        # une même piste locale vers plusieurs pairs
+        self._rooms: dict[str, asyncio.Future] = {}       # room -> décision (bool) prise une seule fois
 
     # --- connexion ---
     async def start(self):
@@ -138,7 +141,7 @@ class OriaNode:
         elif k == "answer":
             s.answer.set_result(obj["sdp"])
         elif k == "ring":
-            self._spawn(self._answer_ring(peer))
+            self._spawn(self._answer_ring(peer, obj))
         elif k in ("accept", "decline"):
             s.reply.set_result(k)
         elif k == "bye":
@@ -165,7 +168,7 @@ class OriaNode:
         pc = RTCPeerConnection(self.rtc_config)
         self._sessions[peer].pc = pc
         if self.local_track is not None:
-            pc.addTrack(self.local_track)
+            pc.addTrack(self._relay.subscribe(self.local_track))
 
         @pc.on("track")
         def _(track):
@@ -173,12 +176,35 @@ class OriaNode:
                 self.on_track(peer, track)
         return pc
 
-    async def _answer_ring(self, peer: str):
-        ok = True
-        if self.on_incoming:
-            r = self.on_incoming(peer)
-            ok = await r if inspect.isawaitable(r) else r
+    async def _decide(self, who: str) -> bool:
+        if not self.on_incoming:
+            return True
+        r = self.on_incoming(who)
+        return bool(await r if inspect.isawaitable(r) else r)
+
+    async def _answer_ring(self, peer: str, obj: dict):
+        room = obj.get("room")
+        if not room:
+            ok = await self._decide(peer)
+        elif room in self._rooms:
+            ok = await self._rooms[room]            # déjà décidé (ou en cours) pour cette salle
+        else:
+            fut = self._rooms[room] = asyncio.get_running_loop().create_future()
+            ok = await self._decide(obj.get("initiator", peer))   # on ne demande qu'une fois par salle
+            fut.set_result(ok)
+            if ok:
+                self._spawn(self._join_room(room, obj["members"], obj["initiator"]))
         await self._send_enc(peer, {"kind": "accept" if ok else "decline"})
+
+    async def _join_room(self, room: str, members: list[str], initiator: str):
+        """Maillage : l'initiateur nous a appelés ; on appelle les autres membres d'ID supérieur
+        (un seul sens par paire, pas de collision d'appels)."""
+        for m in members:
+            if m not in (self.identity.id, initiator) and self.identity.id < m:
+                try:
+                    await self.call(m, room=room, members=members, initiator=initiator)
+                except Exception:
+                    pass  # membre injoignable ou ayant refusé : le reste de la salle continue
 
     async def _session(self, peer: str, timeout: float) -> Session:
         s = self._sessions.get(peer)
@@ -195,12 +221,17 @@ class OriaNode:
         s.ready.set()
         return s
 
-    async def call(self, peer_id: str, timeout: float = 15, ring_timeout: float = 30) -> RTCPeerConnection:
+    async def call(self, peer_id: str, timeout: float = 15, ring_timeout: float = 30, *,
+                   room: str | None = None, members: list[str] | None = None,
+                   initiator: str | None = None) -> RTCPeerConnection:
         """Appelle un ID Oria : handshake, sonnerie, puis négociation WebRTC. Lève CallDeclined si refusé."""
         s = await self._session(peer_id, timeout)
         loop = asyncio.get_running_loop()
         s.reply, s.answer = loop.create_future(), loop.create_future()
-        await self._send_enc(peer_id, {"kind": "ring"})
+        ring = {"kind": "ring"}
+        if room:
+            ring.update(room=room, members=members, initiator=initiator or self.identity.id)
+        await self._send_enc(peer_id, ring)
         if await asyncio.wait_for(s.reply, ring_timeout) == "decline":
             raise CallDeclined(peer_id)
         pc = self._new_pc(peer_id)
@@ -208,6 +239,18 @@ class OriaNode:
         await self._send_enc(peer_id, {"kind": "offer", "sdp": pc.localDescription.sdp})
         await pc.setRemoteDescription(RTCSessionDescription(await asyncio.wait_for(s.answer, timeout), "answer"))
         return pc
+
+    async def call_group(self, peer_ids: list[str], **kw) -> dict:
+        """Appel de groupe en maillage (audio direct entre chaque paire). Retourne {id: pc | exception}.
+        Les invités appellent entre eux ; un refus n'empêche pas les autres de se connecter."""
+        room = os.urandom(8).hex()
+        members = sorted({self.identity.id, *peer_ids})
+        loop = asyncio.get_running_loop()
+        self._rooms[room] = loop.create_future()
+        self._rooms[room].set_result(True)
+        res = await asyncio.gather(*[self.call(p, room=room, members=members, initiator=self.identity.id, **kw)
+                                     for p in peer_ids], return_exceptions=True)
+        return dict(zip(peer_ids, res))
 
     async def hangup(self, peer_id: str):
         s = self._sessions.get(peer_id)

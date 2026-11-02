@@ -1,0 +1,31 @@
+# Signalisation Oria + coturn. Depuis la racine du dépôt :
+#   cp deploy/.env.example deploy/.env  (puis éditer)  &&  docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+services:
+  signaling:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      ORIA_TURN_SECRET: ${ORIA_TURN_SECRET:?définir ORIA_TURN_SECRET}
+      ORIA_TURN_URLS: turn:${PUBLIC_IP:?définir PUBLIC_IP}:3478?transport=udp,turn:${PUBLIC_IP}:3478?transport=tcp
+    ports:
+      - "8765:8765"
+    restart: unless-stopped
+
+  coturn:
+    image: coturn/coturn:4.6
+    network_mode: host   # plage UDP de relais large : plus simple et plus fiable qu'un mappage de ports
+    command:
+      - -n
+      - --log-file=stdout
+      - --listening-port=3478
+      - --realm=oria
+      - --external-ip=${TURN_EXTERNAL_IP:-${PUBLIC_IP}}
+      - --fingerprint
+      - --use-auth-secret
+      - --static-auth-secret=${ORIA_TURN_SECRET}
+      - --min-port=49152
+      - --max-port=49252
+      - --no-multicast-peers
+      - --no-cli
+    restart: unless-stopped

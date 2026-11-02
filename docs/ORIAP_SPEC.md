@@ -32,10 +32,11 @@ Trame = `compteur (u64 BE)` ‖ ChaCha20-Poly1305(nonce = 4×0 ‖ compteur). Le
 - Serveur WebSocket (`oriap/signaling.py`) : à la connexion, challenge `nonce` ; le client prouve la possession de la clé en signant `"oriap/v1/signal" ‖ nonce`. Le serveur tient un annuaire `ID → connexion` et relaie `{"type":"relay","to":ID,"payload":…}` sans interpréter la charge. Cible hors ligne ⇒ `{"type":"error","code":"offline"}`.
 - Le serveur n'est pas de confiance : le handshake §2 passe en charge utile (`hs1`/`hs2`/`auth`), puis l'offre/réponse SDP WebRTC circule chiffrée (`enc`) sous la clé de session. L'empreinte DTLS du SDP est ainsi liée aux ID authentifiés ; le serveur ne voit ni le SDP ni le média (média = direct, DTLS-SRTP).
 - `OriaNode.call(id)` (`oriap/node.py`) : un appel vocal initié uniquement à partir d'un ID Oria, sans numéro. Test : `oriap/tests/test_call.py` (audio sinusoïdal reçu par le pair en loopback).
-- Traversée NAT : `OriaNode(ice_servers=[...])` ou variable `ORIA_ICE_SERVERS` (JSON, ex. `[{"urls":"stun:h:3478"},{"urls":"turn:h:3478","username":"u","credential":"c"}]`). Sans configuration : aucun serveur, LAN/loopback uniquement (pas de dépendance à un tiers par défaut). Un coturn auto-hébergé est fourni dans `deploy/`.
+- Traversée NAT : `OriaNode(ice_servers=[...])` ou variable `ORIA_ICE_SERVERS` (JSON, ex. `[{"urls":"stun:h:3478"},{"urls":"turn:h:3478","username":"u","credential":"c"}]`). Sans configuration : aucun serveur, LAN/loopback uniquement (pas de dépendance à un tiers par défaut). Signalisation + coturn auto-hébergés : `deploy/docker-compose.yml`.
 - Identifiants TURN éphémères : `serve(turn_secret=…, turn_urls=[…])` envoie à chaque client authentifié `username = expiration`, `credential = base64(HMAC-SHA1(secret, username))` (mode `use-auth-secret` de coturn). Le secret ne quitte pas le serveur ; un client peut toujours imposer ses propres serveurs.
 - Sonnerie : après le handshake, `ring` → le pair répond `accept` ou `decline` (`CallDeclined`), puis offre/réponse SDP. `bye` raccroche. Tous ces messages sont chiffrés sous la clé de session.
-- Limites : STUN/TURN **non testé sur un vrai NAT** (le sandbox n'a qu'un réseau) ; le serveur voit qui appelle qui ; pas de limitation de débit ; appel à deux uniquement (pas d'appel de groupe).
+- Limites : STUN/TURN **non testé sur un vrai NAT** (le sandbox n'a qu'un réseau) ; le serveur voit qui appelle qui ; pas de limitation de débit ; appel de groupe en maillage seulement (voir ci-dessous), donc coûteux en bande passante au-delà de ~4-5 personnes.
+- Appel de groupe : `call_group([ids])` crée une salle ; l'initiateur appelle chaque invité (`ring` avec `room`, `members`, `initiator`). Une fois accepté, chaque invité appelle les membres d'ID supérieur au sien (un seul sens par paire, pas de collision), ce qui forme un maillage complet. L'acceptation n'est demandée qu'une fois par salle ; un refus exclut seulement le refusant. Un invité qui n'a pas reçu l'invitation de l'initiateur n'est pas rejoint par les autres membres tant qu'il n'a pas répondu (l'appel entre invités attend la décision).
 
 ## 7. Fil de messages répliqué (`oriap/replication.py`)
 - Message = `{id, body{author, ts, text, parents}, sig}` ; `id = SHA-256("oriap/v1/msg" ‖ corps canonique)`, `sig` = signature Ed25519 de l'auteur sur l'`id`. Tout nœud peut vérifier un message sans faire confiance à celui qui le relaie : un relais ne peut ni modifier ni falsifier un message.
@@ -44,6 +45,6 @@ Trame = `compteur (u64 BE)` ‖ ChaCha20-Poly1305(nonce = 4×0 ‖ compteur). Le
 - Limites : liste d'ids complète à chaque synchro (non scalable) ; `ts` déclaratif (non fiable pour l'ordre, sert de départage) ; pas d'édition/suppression ; pas de chiffrement de groupe (le contenu est visible de tout nœud qui le reçoit) ; pas de contrôle d'accès au fil ; un message dont les parents manquent est accepté.
 
 ## 8. Suite
-1. Appel de groupe (maillage ou SFU), tests sur un vrai NAT.
+1. Tests sur un vrai NAT (`docs/PROXMOX_TEST.md`), SFU pour les grands groupes, commande CLI d'appel de groupe.
 2. Chiffrement de groupe pour les messages, contrôle d'accès, synchro par plages (Merkle/IBLT).
 3. Rotation/révocation de clé, multi-appareils, noms lisibles.
