@@ -10,11 +10,12 @@ import os
 import websockets
 
 from .identity import Identity
+from .turn import turn_credentials
 
 CTX = b"oriap/v1/signal"
 
 
-async def _handler(ws, registry: dict):
+async def _handler(ws, registry: dict, ice: dict):
     nonce = os.urandom(16)
     await ws.send(json.dumps({"type": "challenge", "nonce": nonce.hex()}))
     try:
@@ -31,7 +32,11 @@ async def _handler(ws, registry: dict):
     registry[oria_id] = ws
     if old is not None:
         await old.close(4409, "replaced")
-    await ws.send(json.dumps({"type": "ready"}))
+    ready = {"type": "ready"}
+    if ice.get("turn_secret"):
+        user, cred = turn_credentials(ice["turn_secret"], ice["ttl"])
+        ready["ice_servers"] = [{"urls": u, "username": user, "credential": cred} for u in ice["urls"]]
+    await ws.send(json.dumps(ready))
     try:
         async for raw in ws:
             try:
@@ -52,11 +57,14 @@ async def _handler(ws, registry: dict):
             del registry[oria_id]
 
 
-def serve(host: str = "127.0.0.1", port: int = 8765):
-    """Retourne le context manager websockets.serve (usage : `async with serve(...)`)."""
+def serve(host: str = "127.0.0.1", port: int = 8765, turn_secret: str | None = None,
+          turn_urls: list[str] | None = None, turn_ttl: int = 3600):
+    """Retourne le context manager websockets.serve (usage : `async with serve(...)`).
+    Avec `turn_secret`, chaque client authentifié reçoit des identifiants TURN éphémères."""
     registry: dict = {}
+    ice = {"turn_secret": turn_secret, "urls": turn_urls or [], "ttl": turn_ttl}
 
     async def handler(ws):
-        await _handler(ws, registry)
+        await _handler(ws, registry, ice)
 
     return websockets.serve(handler, host, port)

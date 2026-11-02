@@ -84,5 +84,52 @@ class IceConfigTest(unittest.TestCase):
             self.assertEqual(ice_config().iceServers[0].urls, "stun:e:1")
 
 
+class RingAndTurnTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.srv = await serve("127.0.0.1", 0, turn_secret="s3cret", turn_urls=["turn:t:3478"]).__aenter__()
+        self.url = f"ws://127.0.0.1:{self.srv.sockets[0].getsockname()[1]}"
+
+    async def asyncTearDown(self):
+        self.srv.close()
+        await self.srv.wait_closed()
+
+    async def test_decline_then_accept_then_hangup(self):
+        from oriap.node import CallDeclined
+        decisions = iter([False, True])
+        hung = asyncio.get_running_loop().create_future()
+        a, b = Identity.generate(), Identity.generate()
+        na = OriaNode(a, self.url, local_track=ToneTrack())
+        nb = OriaNode(b, self.url, local_track=ToneTrack(), on_incoming=lambda peer: next(decisions),
+                      on_hangup=lambda peer: hung.set_result(peer))
+        await na.start(); await nb.start()
+        try:
+            with self.assertRaises(CallDeclined):
+                await na.call(b.id)
+            pc = await na.call(b.id)                    # 2e tentative : acceptée, même session
+            self.assertIn(pc.connectionState, ("new", "connecting", "connected"))
+            await na.hangup(b.id)
+            self.assertEqual(await asyncio.wait_for(hung, 5), a.id)
+        finally:
+            await na.stop(); await nb.stop()
+
+    async def test_server_gives_ephemeral_turn_credentials(self):
+        from oriap.turn import turn_credentials
+        n = OriaNode(Identity.generate(), self.url)
+        await n.start()
+        try:
+            srv = n.rtc_config.iceServers[0]
+            self.assertEqual(srv.urls, "turn:t:3478")
+            self.assertEqual(srv.credential, turn_credentials("s3cret", now=int(srv.username) - 3600)[1])
+        finally:
+            await n.stop()
+
+    def test_turn_credentials_known_value(self):
+        from oriap.turn import turn_credentials
+        u, c = turn_credentials("secret", 100, now=1000)
+        self.assertEqual(u, "1100")
+        import base64, hashlib, hmac
+        self.assertEqual(c, base64.b64encode(hmac.new(b"secret", b"1100", hashlib.sha1).digest()).decode())
+
+
 if __name__ == "__main__":
     unittest.main()
