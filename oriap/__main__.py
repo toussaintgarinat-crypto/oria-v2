@@ -3,7 +3,7 @@
   python -m oriap serve  --port 8765 [--turn-secret S --turn-url turn:IP:3478]   # ou ORIA_TURN_SECRET / ORIA_TURN_URLS
   python -m oriap listen --url ws://H:8765 --key a.key [--decline] [--out recu.wav]
   python -m oriap call   --url ws://H:8765 --key b.key --to oria:... [--seconds 5] [--out recu.wav]
-  python -m oriap chat   --url ws://H:8765 --key a.key --db a.db [--peer oria:...]
+  python -m oriap chat   --url ws://H:8765 --key a.key --db a.db [--peer oria:...]   # fil public + groupes chiffrés
 """
 import argparse
 import asyncio
@@ -88,7 +88,7 @@ async def run(a):
         me = load_identity(a.key)
         node = OriaNode(me, a.url, log=MessageLog(a.db))
         await node.start()
-        print(f"en ligne : {me.id}\nTapez un message (Entrée) ; /sync ID pour rattraper un pair ; /fil pour afficher.", flush=True)
+        print(f"en ligne : {me.id}\nTapez un message (Entrée) ; /sync ID ; /fil ; /groupe ID… ; /g GROUPE texte ; /lire GROUPE ; /membres GROUPE ID…", flush=True)
         if a.peer:
             await node.sync(a.peer)
         loop = asyncio.get_running_loop()
@@ -98,6 +98,17 @@ async def run(a):
                 continue
             if line.startswith("/sync "):
                 await node.sync(line.split()[1])
+            elif line.startswith("/groupe "):            # /groupe ID [ID…] : crée un groupe chiffré
+                print("groupe créé :", await node.create_group(line.split()[1:]))
+            elif line.startswith("/g "):                 # /g GROUPE texte
+                _, gid, text = line.split(" ", 2)
+                await node.post_group(gid, text)
+            elif line.startswith("/lire "):              # /lire GROUPE
+                for m in node.read_group(line.split()[1]):
+                    print(f"[{m['author'][:14]}… ép.{m['epoch']}] {m['text']}")
+            elif line.startswith("/membres "):           # /membres GROUPE ID [ID…] : remplace la liste (admin) -> nouvelle clé
+                _, gid, *ids = line.split()
+                await node.set_members(gid, ids)
             elif line == "/fil":
                 for m in node.log.thread():
                     print(f"[{m['body']['author'][:14]}…] {m['body']['text']}")

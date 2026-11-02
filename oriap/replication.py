@@ -28,10 +28,23 @@ class MessageLog:
     def __init__(self, path: str = ":memory:"):
         self._db = sqlite3.connect(path)
         self._db.execute("CREATE TABLE IF NOT EXISTS msgs (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
+        self._db.execute("CREATE TABLE IF NOT EXISTS keys (thread TEXT, epoch INTEGER, key BLOB, PRIMARY KEY (thread, epoch))")
         self._msgs: dict[str, dict] = {m["id"]: m for m in (json.loads(r[0]) for r in self._db.execute("SELECT data FROM msgs"))}
 
     def close(self):
         self._db.close()
+
+    def all(self) -> list[dict]:
+        return list(self._msgs.values())
+
+    def put_key(self, thread: str, epoch: int, key: bytes):
+        """Clés de groupe stockées en clair dans la base locale : la protection du disque est à la charge de l'appareil."""
+        self._db.execute("INSERT OR REPLACE INTO keys VALUES (?, ?, ?)", (thread, epoch, key))
+        self._db.commit()
+
+    def get_key(self, thread: str, epoch: int) -> bytes | None:
+        r = self._db.execute("SELECT key FROM keys WHERE thread=? AND epoch=?", (thread, epoch)).fetchone()
+        return r[0] if r else None
 
     def ids(self) -> set[str]:
         return set(self._msgs)
@@ -63,16 +76,18 @@ class MessageLog:
         self._db.commit()
         return True
 
-    def create(self, identity: Identity, text: str, ts: int | None = None) -> dict:
-        body = {"author": identity.id, "ts": int(time.time()) if ts is None else ts,
+    def create(self, identity: Identity, text: str, ts: int | None = None, **extra) -> dict:
+        """`extra` : champs signés supplémentaires (fil chiffré : thread, epoch, nonce, kind…)."""
+        body = {**extra, "author": identity.id, "ts": int(time.time()) if ts is None else ts,
                 "text": text, "parents": self.heads()}
         mid = _msg_id(body)
         msg = {"id": mid, "body": body, "sig": identity.sign(mid.encode()).hex()}
         self.add(msg)
         return msg
 
-    def thread(self) -> list[dict]:
-        """Ordre déterministe : tri topologique, départage (ts, id)."""
+    def thread(self, thread_id: str | None = None) -> list[dict]:
+        """Ordre déterministe : tri topologique, départage (ts, id). Sans argument : le fil public
+        (messages hors groupe) ; avec un id : les messages (chiffrés) de ce groupe."""
         pending = {i: {p for p in m["body"]["parents"] if p in self._msgs} for i, m in self._msgs.items()}
         children: dict[str, list[str]] = {}
         for i, ps in pending.items():
@@ -84,7 +99,9 @@ class MessageLog:
         out = []
         while heap:
             _, i = heapq.heappop(heap)
-            out.append(self._msgs[i])
+            b = self._msgs[i]["body"]
+            if b.get("thread") == thread_id and b.get("kind") != "epoch":
+                out.append(self._msgs[i])
             for c in children.get(i, []):
                 pending[c].discard(i)
                 if not pending[c]:

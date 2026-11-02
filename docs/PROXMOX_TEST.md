@@ -37,7 +37,9 @@ Les clients reçoivent automatiquement les identifiants TURN éphémères du ser
 4. **Appel de groupe** — 3 clients en `listen`, puis depuis A (script Python : `await node.call_group([id_b, id_c])`, voir `oriap/tests/test_call.py::GroupCallTest`). Pas encore de commande CLI dédiée.
 5. **Messages à 3 nœuds** — `python -m oriap chat --url ws://IP_VM:8765 --key x.key --db x.db` sur chaque poste ; A fait `/sync <ID de B>`, C fait `/sync <ID de B>` ; écrire depuis A, C et B simultanément ; `/fil` doit afficher le même ordre partout. Couper C, écrire sur A, relancer C et `/sync <ID de B>` : C doit rattraper.
 
+6. **Groupe chiffré** — A : `/groupe <ID B> <ID C>` (affiche l'identifiant du groupe), puis `/g <GROUPE> bonjour`. B et C (connectés à A ou B par `/sync`) : `/lire <GROUPE>`. Un 4ᵉ poste D, connecté mais non membre, ne doit rien recevoir du groupe. A : `/membres <GROUPE> <ID B>` (retire C) puis `/g <GROUPE> suite` : C ne lit plus que l'ancien contenu.
+
 ## 4. À savoir pour interpréter les résultats
 - Le client n'a pas de mode « relais seulement » : un appel qui réussit peut passer en direct (STUN) plutôt que par TURN. Pour prouver que TURN fonctionne, regardez les `allocation` dans les logs coturn, ou bloquez l'UDP direct entre les deux postes.
 - Le serveur de signalisation voit qui appelle qui (métadonnées), pas le contenu (chiffré de bout en bout) ni l'audio.
-- Les messages du fil ne sont pas chiffrés pour le groupe : tout nœud qui les reçoit les lit.
+- Le fil public (`/fil`) n'est pas chiffré : tout nœud qui le reçoit le lit. Les groupes (`/groupe`) le sont, voir `docs/ORIAP_SPEC.md` §8.

@@ -16,6 +16,7 @@ from aiortc.contrib.media import MediaRelay
 
 from .handshake import Handshake
 from .identity import Identity
+from .groups import Groups
 from .replication import MessageLog
 from .signaling import CTX
 
@@ -56,6 +57,7 @@ class OriaNode:
         self.local_track = local_track    # piste envoyée quand on décroche / appelle
         self._own_log = log is None
         self.log = log if log is not None else MessageLog()
+        self.groups = Groups(self.log, identity)
         self._ice_explicit = ice_servers is not None or bool(os.environ.get("ORIA_ICE_SERVERS"))
         self.rtc_config = ice_config(ice_servers)
         self._ws = None
@@ -152,16 +154,34 @@ class OriaNode:
                 self.on_hangup(peer)
         elif k == "sync_have":      # le pair annonce ses ids : on renvoie ce qui lui manque + nos ids
             theirs = set(obj["ids"])
-            await self._send_enc(peer, {"kind": "sync_reply", "msgs": self.log.get(self.log.ids() - theirs),
-                                        "ids": sorted(self.log.ids())})
+            await self._send_enc(peer, {"kind": "sync_reply", "msgs": self._shareable(peer, self.log.ids() - theirs),
+                                        "ids": self._advertise(peer)})
+            await self._send_keys(peer)         # après les éléments : une clé n'est valide que si son époque est connue
         elif k == "sync_reply":
             new = [m for m in obj["msgs"] if self.log.add(m)]
             await self._gossip(new, exclude=peer)
-            missing = self.log.ids() - set(obj["ids"])
-            await self._send_enc(peer, {"kind": "sync_msgs", "msgs": self.log.get(missing)})
+            await self._send_enc(peer, {"kind": "sync_msgs", "msgs": self._shareable(peer, self.log.ids() - set(obj["ids"]))})
+            await self._send_keys(peer)
         elif k == "sync_msgs":
             new = [m for m in obj["msgs"] if self.log.add(m)]
             await self._gossip(new, exclude=peer)
+        elif k == "keys":
+            if self.groups.accept_keys(obj["grants"]):       # clés nouvelles : les relayer aux autres membres joignables
+                for other, os_ in list(self._sessions.items()):
+                    if other != peer and os_.ready.is_set():
+                        await self._send_keys(other)
+
+    def _shareable(self, peer: str, ids) -> list[dict]:
+        """Seuls les éléments que `peer` a le droit de recevoir (public, ou groupes dont il est membre)."""
+        return [m for m in self.log.get(ids) if self.groups.allowed(peer, m)]
+
+    def _advertise(self, peer: str) -> list[str]:
+        return sorted(m["id"] for m in self._shareable(peer, self.log.ids()))
+
+    async def _send_keys(self, peer: str):
+        grants = self.groups.keys_for(peer)
+        if grants:
+            await self._send_enc(peer, {"kind": "keys", "grants": grants})
 
     # --- appels ---
     def _new_pc(self, peer: str) -> RTCPeerConnection:
@@ -267,17 +287,49 @@ class OriaNode:
         return msg
 
     async def _gossip(self, msgs: list[dict], exclude: str | None = None):
-        """Pousse les nouveaux messages aux pairs connectés (hors source) : relais de proche en proche."""
+        """Pousse les nouveaux éléments aux pairs connectés (hors source), seulement ceux qu'ils ont le droit
+        de recevoir : relais de proche en proche, sans fuite hors du groupe."""
         if not msgs:
             return
         for peer, s in list(self._sessions.items()):
             if peer != exclude and s.ready.is_set():
+                part = [m for m in msgs if self.groups.allowed(peer, m)]
                 try:
-                    await self._send_enc(peer, {"kind": "sync_msgs", "msgs": msgs})
+                    if part:
+                        await self._send_enc(peer, {"kind": "sync_msgs", "msgs": part})
+                        await self._send_keys(peer)
                 except Exception:
                     pass
 
     async def sync(self, peer_id: str, timeout: float = 15):
         """Réconcilie le journal avec un pair (rattrapage après une absence)."""
         await self._session(peer_id, timeout)
-        await self._send_enc(peer_id, {"kind": "sync_have", "ids": sorted(self.log.ids())})
+        await self._send_enc(peer_id, {"kind": "sync_have", "ids": self._advertise(peer_id)})
+
+    # --- groupes chiffrés ---
+    async def create_group(self, members: list[str]) -> str:
+        ev = self.groups.create_group(members)
+        await self._push_group(ev)
+        return ev["id"]
+
+    async def set_members(self, group_id: str, members: list[str]):
+        """Ajout/retrait (admin) : nouvelle époque, nouvelle clé, diffusée aux membres joignables."""
+        await self._push_group(self.groups.rotate(group_id, members))
+
+    async def post_group(self, group_id: str, text: str) -> dict:
+        msg = self.groups.encrypt(group_id, text)
+        await self._gossip([msg])
+        return msg
+
+    def read_group(self, group_id: str) -> list[dict]:
+        return self.groups.read(group_id)
+
+    async def _push_group(self, ev: dict):
+        for m in ev["body"]["members"]:
+            if m != self.identity.id:
+                try:
+                    await self._session(m, 5)           # joindre les membres en ligne ; les autres rattraperont via /sync
+                except Exception:
+                    pass
+        tid = ev["id"] if "thread" not in ev["body"] else ev["body"]["thread"]
+        await self._gossip(list(self.groups.epochs()[tid].values()))   # toute la chaîne d'époques (un nouveau membre en a besoin)
